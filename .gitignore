@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Environment Variables
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Docker
+docker-compose.override.yml
+
+# IDEs and editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional Mac files
+.DS_Store
+
+# Optional fastify-cli files
+.fastify-cli/
+
+remnawave-bot-plan.md
+openapi.json

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    restart: always
+    depends_on:
+      - mongodb
+    env_file:
+      - .env
+    networks:
+      - remnawave-shop-network
+
+  mongodb:
+    image: mongo:latest
+    restart: always
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+    networks:
+      - remnawave-shop-network
+
+networks:
+  remnawave-shop-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
