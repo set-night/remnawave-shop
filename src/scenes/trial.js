@@ -23,10 +23,12 @@ trialScene.enter(async (ctx) => {
   }
 
   if (user.trialUsed) {
-    await ctx.reply(ctx.i18n('trialAlreadyUsed'), Markup.inlineKeyboard([
+    await ctx.reply(ctx.i18n('trialAlreadyUsed'), {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
       [Markup.button.callback(ctx.i18n('buySubscriptionButton'), 'GO_TO_BUY_SCENE')],
       [Markup.button.callback(ctx.i18n('backButton'), 'LEAVE_SCENE_TRIAL')]
-    ]));
+    ])});
     return; // Не выходим из сцены, даем кнопки
   }
 
@@ -34,10 +36,12 @@ trialScene.enter(async (ctx) => {
   await ctx.reply(ctx.i18n('trialOfferMessage', {
     duration: config.trialDuration,
     traffic: config.trialTraffic,
-  }), Markup.inlineKeyboard([
+  }), {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
     [Markup.button.callback(ctx.i18n('activateTrialButton'), 'ACTIVATE_TRIAL')],
     [Markup.button.callback(ctx.i18n('backButton'), 'LEAVE_SCENE_TRIAL')]
-  ]));
+  ])});
 });
 
 trialScene.action('ACTIVATE_TRIAL', async (ctx) => {
@@ -52,12 +56,14 @@ trialScene.action('ACTIVATE_TRIAL', async (ctx) => {
 
   await ctx.editMessageText(ctx.i18n('activatingTrial'));
 
+  const trialStartDate = new Date();
+  const trialEndDate = new Date(trialStartDate);
+  trialEndDate.setDate(trialEndDate.getDate() + config.trialDuration);
+
   // 1. Попытка создать пробную подписку в Remnawave
   // Это также создаст пользователя в Remnawave, если его нет.
   // Имя пользователя в Remnawave будет ID нашей временной подписки.
   const usernameForPanel = `trial_user${user.telegramId}`; // Unique username for trial
-  trialEndDate = new Date();
-  trialEndDate.setDate(trialEndDate.getDate() + config.trialDuration);
 
   const userDataForRemnawave = {
     username: usernameForPanel,
@@ -75,17 +81,17 @@ trialScene.action('ACTIVATE_TRIAL', async (ctx) => {
   if (!remnawaveApiResponse || !remnawaveApiResponse.success) {
     await ctx.reply(ctx.i18n('trialActivationErrorRemnawave', { message: remnawaveApiResponse.message || '' }));
     // Показываем сообщение об ошибке и кнопки для возврата или покупки
-    await ctx.reply(ctx.i18n('trialActivationErrorRemnawave', { message: remnawaveApiResponse.message || '' }), Markup.inlineKeyboard([
+    await ctx.reply(ctx.i18n('trialActivationErrorRemnawave', { message: remnawaveApiResponse.message || '' }), {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
         [Markup.button.callback(ctx.i18n('buySubscriptionButton'), 'GO_TO_BUY_SCENE')],
         [Markup.button.callback(ctx.i18n('backButton'), 'LEAVE_SCENE_TRIAL_AFTER_ERROR')]
-    ]));
+    ])});
     return; // Не выходим из сцены сразу, даем пользователю выбор
   }
 
   // 2. Создание записи о пробной подписке в нашей БД
-  const trialStartDate = new Date();
-  const trialEndDate = new Date(trialStartDate);
-  trialEndDate.setDate(trialEndDate.getDate() + config.trialDuration);
+
 
   const trialPayment = new Payment({
     userId: user.telegramId,
@@ -116,12 +122,10 @@ trialScene.action('ACTIVATE_TRIAL', async (ctx) => {
   await ctx.reply(ctx.i18n('trialActivatedSuccessfully', {
     endDate: trialEndDate.toLocaleDateString(ctx.session.language || 'ru-RU'),
     traffic: config.trialTraffic,
-    remnawaveSubscriptionId: (remnawaveApiResponse.success && remnawaveApiResponse.data && remnawaveApiResponse.data.uuid) ? remnawaveApiResponse.data.uuid : usernameForPanel
-  }), Markup.keyboard([
-    [ctx.i18n('mySubscriptionsButton')],
-    [ctx.i18n('referralProgramButton')],
-    [ctx.i18n('helpButton'), ctx.i18n('channelButton')],
-  ]).resize());
+    remnawaveSubscriptionId: (remnawaveApiResponse.success && remnawaveApiResponse.data && remnawaveApiResponse.data.uuid) ? remnawaveApiResponse.data.uuid : usernameForPanel,
+    remnawaveSubscriptionUrl: remnawaveApiResponse.subscriptionUrl
+  }), {
+    parse_mode: 'HTML'})
   
   return ctx.scene.leave();
 });
