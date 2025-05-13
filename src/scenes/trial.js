@@ -123,7 +123,7 @@ trialScene.action('ACTIVATE_TRIAL', async (ctx) => {
     endDate: trialEndDate.toLocaleDateString(ctx.session.language || 'ru-RU'),
     traffic: config.trialTraffic,
     remnawaveSubscriptionId: (remnawaveApiResponse.success && remnawaveApiResponse.data && remnawaveApiResponse.data.uuid) ? remnawaveApiResponse.data.uuid : usernameForPanel,
-    remnawaveSubscriptionUrl: remnawaveApiResponse.subscriptionUrl
+    remnawaveSubscriptionUrl: remnawaveApiResponse.data.subscriptionUrl
   }), {
     parse_mode: 'HTML'})
   
