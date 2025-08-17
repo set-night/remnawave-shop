@@ -41,4 +41,7 @@ module.exports = {
 
   referralEnabled: process.env.REFERRAL_ENABLED === 'true',
   referralBonusDays: parseInt(process.env.REFERRAL_BONUS, 10) || 5, // N дней за реферала
+
+  // Новый параметр для сквада
+  internalSquadUuid: process.env.INTERNAL_SQUAD_UUID,
 };

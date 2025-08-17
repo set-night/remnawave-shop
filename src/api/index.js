@@ -89,18 +89,8 @@ const createRemnawaveUser = async (userData) => {
   const trojanPassword = crypto.randomBytes(12).toString('hex');
   const ssPassword = crypto.randomBytes(12).toString('hex');
 
-  // Parse INBOUND_UUIDS from config if available
-  const inboundUuids = config.inboundUuids ?
-    config.inboundUuids.split(',').map(uuid => uuid.trim()) :
-    [];
-
-  const activeInbounds = inboundUuids.map(uuid => ({
-    uuid: uuid,
-    tag: `Inbound-${uuid.substring(0, 8)}`,
-    type: "vless",
-    network: "tcp",
-    security: "reality"
-  }));
+  // Получаем сквад из конфига
+  const activeInternalSquads = config.internalSquadUuid ? [config.internalSquadUuid] : [];
 
   const payload = {
     username: userData.username || `user${userData.telegramId}_${Math.random().toString(36).substring(2, 8)}`,
@@ -112,14 +102,13 @@ const createRemnawaveUser = async (userData) => {
     ssPassword: ssPassword,
     trafficLimitBytes: trafficLimitBytes,
     trafficLimitStrategy: userData.trafficLimitStrategy || 'NO_RESET',
-    activeUserInbounds: activeInbounds,
     expireAt: userData.expireAt, // ISO string "2025-01-17T15:38:45.065Z"
     description: userData.description || '',
     tag: "SHOP",
     telegramId: parseInt(userData.telegramId, 10),
     email: userData.email || 'no-email@example.com', // Provide default email if null
     hwidDeviceLimit: userData.hwidDeviceLimit !== undefined ? parseInt(userData.hwidDeviceLimit, 10) : 1,
-    activateAllInbounds: userData.activateAllInbounds !== undefined ? userData.activateAllInbounds : true,
+    activeInternalSquads,
   };
 
   try {
