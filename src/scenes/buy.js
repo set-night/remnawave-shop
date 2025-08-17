@@ -670,8 +670,8 @@ buyScene.on('successful_payment', async (ctx) => {
       traffic: payment.trafficAllocatedGb
     });
     
-    const sentMsg = await ctx.reply(successMessage);
-    ctx.session.lastBotMessages = [sentMsg.message_id];
+  const sentMsg = await ctx.replyWithHTML(successMessage);
+  ctx.session.lastBotMessages = [sentMsg.message_id];
 
     await ctx.scene.leave();
     await showMainMenu(ctx);
