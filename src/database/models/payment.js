@@ -30,6 +30,17 @@ const paymentSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  originalAmount: { // Оригинальная сумма до применения скидки с баланса
+    type: Number,
+  },
+  balanceUsed: { // Сколько средств с баланса было использовано как скидка
+    type: Number,
+    default: 0,
+  },
+  useBalance: { // Флаг, что нужно списать баланс при успешной оплате
+    type: Boolean,
+    default: false,
+  },
   currency: { // Валюта платежа
     type: String,
     // required: true, // Может быть неактуально для Telegram Stars или бонусов

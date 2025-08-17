@@ -34,11 +34,15 @@ const userSchema = new mongoose.Schema({
     index: true,
     sparse: true,
   },
-  accumulatedReferralDays: { // Days accumulated from referrals
+  referralEarnings: {
     type: Number,
-    default: 0,
+    default: 0, // Сумма заработка с рефералов (только для внутреннего использования)
   },
-  trialUsed: {
+    balance: {
+      type: Number,
+      default: 0, // Баланс пользователя в долларах
+    },
+    trialUsed: {
     type: Boolean,
     default: false,
   },

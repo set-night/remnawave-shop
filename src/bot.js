@@ -89,7 +89,15 @@ async function showMainMenu(ctx) {
   // Убираем явную отправку сообщения для удаления ReplyKeyboardMarkup.
   // Отправка нового сообщения с InlineKeyboardMarkup обычно сама убирает ReplyKeyboard.
 
-  const mainMenuText = ctx.i18n('mainMenuMessage') || ctx.i18n('welcomeMessage');
+  let mainMenuText = ctx.i18n('mainMenuMessage') || ctx.i18n('welcomeMessage');
+  if (ctx.dbUser && typeof ctx.dbUser.balance === 'number') {
+    mainMenuText += `\n\nВаш баланс: $${ctx.dbUser.balance.toFixed(2)}`;
+  }
+  // Если пользователь — админ, добавить справку по админ-командам
+  const adminIds = (config.botAdmins || []).map(id => String(id));
+  if (ctx.from && adminIds.includes(String(ctx.from.id))) {
+    mainMenuText += `\n\n<b>Админ-команды:</b>\n/admin_balance user_id amount — выдать баланс пользователю по ID`;
+  }
   const mainMenuKeyboard = Markup.inlineKeyboard([
     [
       Markup.button.callback(ctx.i18n('buyButton'), 'enter_buy_scene'),
@@ -105,7 +113,10 @@ async function showMainMenu(ctx) {
   // Удаляем предыдущее сообщение бота, если это был callback_query от инлайн кнопки, чтобы "обновить" меню
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
     try {
-      await ctx.editMessageText(mainMenuText, mainMenuKeyboard);
+        await ctx.editMessageText(mainMenuText, {
+          parse_mode: 'HTML',
+          ...mainMenuKeyboard
+        });
       // Answer the callback query to remove the "loading" state from the button
       await ctx.answerCbQuery().catch(e => console.warn("Error answering CB query after edit:", e.message));
     } catch (e) {
@@ -122,11 +133,17 @@ async function showMainMenu(ctx) {
         // Log if deletion fails, but proceed to reply with a new message.
         console.warn("Could not delete message during edit fallback:", delErr.message);
       }
-      await ctx.reply(mainMenuText, mainMenuKeyboard);
+        await ctx.reply(mainMenuText, {
+          parse_mode: 'HTML',
+          ...mainMenuKeyboard
+        });
     }
   } else {
     // If not a callback query (e.g. /start or a command), or no message associated with callback
-    await ctx.reply(mainMenuText, mainMenuKeyboard);
+      await ctx.reply(mainMenuText, {
+        parse_mode: 'HTML',
+        ...mainMenuKeyboard
+      });
   }
 }
 
@@ -150,17 +167,18 @@ bot.start(async (ctx) => {
       currentUser.referredBy = referringUser.telegramId;
       await currentUser.save();
 
-      referringUser.accumulatedReferralDays = (referringUser.accumulatedReferralDays || 0) + config.referralBonusDays;
+  referringUser.balance = (referringUser.balance || 0) + config.referralBonusAmount;
+  referringUser.referralEarnings = (referringUser.referralEarnings || 0) + config.referralBonusAmount;
       await referringUser.save();
-      
+
       await ctx.reply(ctx.i18n('welcomeReferredMessage', { referrerName: referringUser.firstName || referringUser.username || referringUser.telegramId.toString() }));
-      
+
       // Notify the referring user
       try {
         await ctx.telegram.sendMessage(referringUser.telegramId, ctx.i18n('referralSuccessfulNotification', {
           referredUserName: currentUser.firstName || currentUser.username || currentUser.telegramId.toString(),
-          bonusDays: config.referralBonusDays,
-          totalBonusDays: referringUser.accumulatedReferralDays
+          bonusAmount: config.referralBonusAmount,
+          totalBalance: referringUser.balance.toFixed(2)
         }));
       } catch (e) {
         console.error(`Failed to send referral notification to ${referringUser.telegramId}`, e);
@@ -172,6 +190,30 @@ bot.start(async (ctx) => {
   
   // Показываем главное меню
   await showMainMenu(ctx);
+});
+
+// Команда для админов: /balanceAdd <user_id> <amount>
+bot.command('balanceAdd', async (ctx) => {
+  const adminIds = (config.botAdmins || []).map(id => String(id));
+  if (!ctx.from || !adminIds.includes(String(ctx.from.id))) {
+    return ctx.reply('⛔️ У вас нет прав для этой команды.');
+  }
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length !== 2) {
+    return ctx.reply('Использование: /balanceAdd <user_id> <amount>');
+  }
+  const [userId, amountStr] = args;
+  const amount = parseFloat(amountStr);
+  if (isNaN(amount) || amount <= 0) {
+    return ctx.reply('Сумма должна быть положительным числом.');
+  }
+  const user = await User.findOne({ telegramId: Number(userId) });
+  if (!user) {
+    return ctx.reply('Пользователь с таким ID не найден.');
+  }
+  user.balance = (user.balance || 0) + amount;
+  await user.save();
+  await ctx.reply(`Пользователю ${userId} успешно начислено $${amount.toFixed(2)}. Новый баланс: $${user.balance.toFixed(2)}`);
 });
 
 // Action handlers for inline menu buttons
@@ -332,6 +374,71 @@ bot.command('check_crypto_payments', async (ctx) => {
               console.warn(`[CheckPayments] endDate was not set for payment ${payment._id}. This should be set at creation.`);
           }
           await payment.save();
+          
+          // Списываем баланс если был включен режим скидки
+          if (payment.useBalance && payment.balanceUsed > 0) {
+            const user = await User.findOne({ telegramId: payment.userId });
+            if (user) {
+              user.balance = Math.max(0, user.balance - payment.balanceUsed);
+              await user.save();
+              console.log(`[CheckPayments] Deducted $${payment.balanceUsed} from user ${user.telegramId} balance after CryptoBot payment`);
+            }
+          }
+
+          // Создаём пользователя в Remnawave если его нет
+          const user = await User.findOne({ telegramId: payment.userId });
+          if (user) {
+            let remnawaveUserId = user.remnawaveUserId;
+            if (!remnawaveUserId) {
+              try {
+                const tariffParts = payment.tariffId.split('_');
+                const deviceLimitPart = tariffParts.find(part => part.endsWith('dev'));
+                const hwidDeviceLimit = deviceLimitPart ? parseInt(deviceLimitPart.replace('dev', ''), 10) : 1;
+
+                // Создаём уникальное имя в формате user{telegramId}_{короткий_суффикс}
+                // Ограничиваем длину до 34 символов для соответствия требованиям Remnawave
+                const shortSuffix = Math.random().toString(36).substring(2, 6); // 4 символа
+                const baseUsername = `user${user.telegramId}`;
+                const usernameForPanel = baseUsername.length + shortSuffix.length + 1 <= 34 
+                  ? `${baseUsername}_${shortSuffix}`
+                  : `u${user.telegramId}_${shortSuffix}`; // Укороченная версия если слишком длинно
+
+                const userDataForRemnawave = {
+                  username: usernameForPanel,
+                  telegramId: user.telegramId,
+                  expireAt: payment.endDate.toISOString(),
+                  trafficLimitGb: payment.trafficAllocatedGb,
+                  hwidDeviceLimit: hwidDeviceLimit,
+                  status: 'ACTIVE',
+                  trafficLimitStrategy: 'NO_RESET',
+                  activateAllInbounds: true,
+                  description: `Payment ID: ${payment._id.toString()}; Tariff: ${payment.tariffId}; Method: CryptoBot`,
+                };
+
+                const remnaApiResponse = await createRemnawaveUser(userDataForRemnawave);
+
+                if (remnaApiResponse.success && remnaApiResponse.data && remnaApiResponse.data.uuid) {
+                  remnawaveUserId = remnaApiResponse.data.uuid;
+                  user.remnawaveUserId = remnawaveUserId;
+                  await user.save();
+                  payment.remnawaveUserId = remnawaveUserId;
+                  await payment.save();
+                  console.log(`[CheckPayments] Remnawave user ${remnawaveUserId} created for TG User ${user.telegramId}.`);
+                } else {
+                  console.error(`[CheckPayments] Failed to create Remnawave user for TG ID ${user.telegramId}:`, remnaApiResponse.message, remnaApiResponse.errorData);
+                }
+              } catch (error) {
+                console.error(`[CheckPayments] Exception during Remnawave user creation for ${user.telegramId}:`, error);
+              }
+            } else {
+              // Пользователь уже есть, возможно нужно обновить подписку
+              if (!payment.remnawaveUserId) {
+                payment.remnawaveUserId = remnawaveUserId;
+                await payment.save();
+              }
+            }
+          }
+          
           updatedCount++;
 
           // Notify user
@@ -344,7 +451,7 @@ bot.command('check_crypto_payments', async (ctx) => {
             amount: parseFloat(invoiceDetails.amount),
             asset: invoiceDetails.asset
           });
-          await ctx.telegram.sendMessage(userId, message);
+          await ctx.telegram.sendMessage(userId, message, { parse_mode: 'HTML' });
           await ctx.reply(ctx.i18n('paymentManuallyConfirmed', { invoiceId: payment.paymentId, status: invoiceDetails.status }));
 
         } else if (invoiceDetails.status === 'expired' && payment.status === 'pending') {
@@ -458,6 +565,16 @@ bot.on('successful_payment', async (ctx) => {
 
     const user = await User.findOne({ telegramId: payment.userId });
     if (user) {
+      // Списываем баланс, если он использовался как скидка
+      console.log(`[SuccessfulPayment Stars] Checking balance deduction: useBalance=${payment.useBalance}, balanceUsed=${payment.balanceUsed}, userBalance=${user.balance}`);
+      if (payment.useBalance && payment.balanceUsed > 0) {
+        const oldBalance = user.balance;
+        user.balance = Math.max(0, user.balance - payment.balanceUsed);
+        await user.save();
+        console.log(`[SuccessfulPayment Stars] Deducted $${payment.balanceUsed} from user ${user.telegramId} balance: $${oldBalance} -> $${user.balance}`);
+      } else {
+        console.log(`[SuccessfulPayment Stars] No balance deduction needed: useBalance=${payment.useBalance}, balanceUsed=${payment.balanceUsed}`);
+      }
       let remnawaveUserId = user.remnawaveUserId;
       if (!remnawaveUserId) { // If user doesn't have a Remnawave ID, create them in the panel
         try {
@@ -465,7 +582,12 @@ bot.on('successful_payment', async (ctx) => {
           const deviceLimitPart = tariffParts.find(part => part.endsWith('dev'));
           const hwidDeviceLimit = deviceLimitPart ? parseInt(deviceLimitPart.replace('dev', ''), 10) : 1;
 
-          const usernameForPanel = `user${user.telegramId}`;
+          // Создаём уникальное имя в формате user{telegramId}_{короткий_суффикс}
+          const shortSuffix = Math.random().toString(36).substring(2, 6); // 4 символа
+          const baseUsername = `user${user.telegramId}`;
+          const usernameForPanel = baseUsername.length + shortSuffix.length + 1 <= 34 
+            ? `${baseUsername}_${shortSuffix}`
+            : `u${user.telegramId}_${shortSuffix}`; // Укороченная версия если слишком длинно
 
           const userDataForRemnawave = {
             username: usernameForPanel,

@@ -210,13 +210,188 @@ buyScene.action('CONFIRM_CUSTOM_TARIFF', async (ctx) => {
     ? ctx.i18n('choosePaymentMethodPromptUSD', { tariffName, priceRUB: finalPriceRUB.toFixed(2), priceUSD: finalPriceUSD.toFixed(2) })
     : ctx.i18n('choosePaymentMethodPrompt', { tariffName, priceRUB: finalPriceRUB.toFixed(2) });
 
+  // Кнопка оплаты с баланса
+  let balanceSufficient = user.balance >= (finalPriceUSD || finalPriceRUB);
+  let useBalance = ctx.scene.state.useBalance || false;
+  let payWithBalanceText = ctx.i18n('payWithBalanceButton');
+  let messageTextUpdated = messageText;
+  
+  if (useBalance) {
+    payWithBalanceText = '✅ ' + payWithBalanceText;
+  }
+  if (!balanceSufficient && useBalance) {
+    // Баланса не хватает, будет использован как скидка
+    const remaining = ((finalPriceUSD || finalPriceRUB) - user.balance).toFixed(2);
+    payWithBalanceText += ` (-$${user.balance.toFixed(2)})`;
+    messageTextUpdated += `\n\n💰 Будет использован баланс: $${user.balance.toFixed(2)}\nК доплате: $${remaining}`;
+  }
+
   const paymentKeyboard = Markup.inlineKeyboard([
+    [Markup.button.callback(payWithBalanceText, 'PAY_BALANCE')],
     [Markup.button.callback(ctx.i18n('payWithCryptoBot'), 'PAY_CRYPTOBOT')],
     [Markup.button.callback(ctx.i18n('payWithTelegramStars'), 'PAY_STARS')],
     [Markup.button.callback(ctx.i18n('backToTariffConstructor'), 'BACK_TO_CONSTRUCTOR')]
   ]);
 
-  await ctx.editMessageText(messageText, paymentKeyboard);
+  await ctx.editMessageText(messageTextUpdated, paymentKeyboard);
+
+});
+
+// Обработка оплаты с баланса
+buyScene.action('PAY_BALANCE', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = ctx.dbUser;
+  const { paymentDetails } = ctx.scene.state;
+  if (!paymentDetails) {
+    await ctx.reply(ctx.i18n('sessionExpiredOrError'));
+    return ctx.scene.leave();
+  }
+  
+  let balanceSufficient = user.balance >= (paymentDetails.finalPriceUSD || paymentDetails.finalPriceRUB);
+  let useBalance = ctx.scene.state.useBalance || false;
+  
+  if (balanceSufficient) {
+    // Баланса хватает — сразу покупаем
+    await ctx.reply(ctx.i18n('balancePaymentConfirm', { amount: (paymentDetails.finalPriceUSD || paymentDetails.finalPriceRUB).toFixed(2) }));
+
+    // Списываем баланс
+    user.balance -= (paymentDetails.finalPriceUSD || paymentDetails.finalPriceRUB);
+    await user.save();
+
+    // Создаём платеж
+    const now = new Date();
+    const endDate = new Date(now.getTime() + paymentDetails.selectedDurationOpt.actualMonths * 30 * 24 * 60 * 60 * 1000);
+    const payment = new Payment({
+      userId: user.telegramId,
+      remnawaveUserId: null,
+      tariffId: `custom_${paymentDetails.selectedDurationOpt.id}m_${paymentDetails.selectedGbOpt.id}gb_${paymentDetails.selectedConnectionsOpt.id}dev`,
+      paymentSystem: 'balance',
+      amount: 0, // Balance payment - no additional charge
+      originalAmount: (paymentDetails.finalPriceUSD || paymentDetails.finalPriceRUB), // Original full price
+      balanceUsed: (paymentDetails.finalPriceUSD || paymentDetails.finalPriceRUB), // Full amount from balance
+      currency: paymentDetails.finalPriceUSD ? 'USD' : 'RUB',
+      status: 'active',
+      startDate: now,
+      endDate: endDate,
+      trafficAllocatedGb: parseInt(paymentDetails.selectedGbOpt.id),
+      isTrial: false,
+      useBalance: true, // This is a balance payment
+      createdAt: now,
+      updatedAt: now
+    });
+    await payment.save();
+
+    // Выдаём подписку через Remnawave API
+    let remnawaveUserId = user.remnawaveUserId;
+    if (!remnawaveUserId) {
+      try {
+        // Создаём уникальное имя в формате user{telegramId}_{короткий_суффикс}
+        const shortSuffix = Math.random().toString(36).substring(2, 6); // 4 символа
+        const baseUsername = `user${user.telegramId}`;
+        const usernameForPanel = baseUsername.length + shortSuffix.length + 1 <= 34 
+          ? `${baseUsername}_${shortSuffix}`
+          : `u${user.telegramId}_${shortSuffix}`; // Укороченная версия если слишком длинно
+        const userDataForRemnawave = {
+          username: usernameForPanel,
+          telegramId: user.telegramId,
+          expireAt: endDate.toISOString(),
+          trafficLimitGb: paymentDetails.selectedGbOpt.id,
+          hwidDeviceLimit: paymentDetails.selectedConnectionsOpt.id,
+          status: 'ACTIVE',
+          trafficLimitStrategy: 'NO_RESET',
+          activateAllInbounds: true,
+          description: `Payment ID: ${payment._id.toString()}; Tariff: ${payment.tariffId}; Method: Balance`,
+        };
+        const remnaApiResponse = await createRemnawaveUser(userDataForRemnawave);
+        if (remnaApiResponse.success && remnaApiResponse.data && remnaApiResponse.data.uuid) {
+          remnawaveUserId = remnaApiResponse.data.uuid;
+          user.remnawaveUserId = remnawaveUserId;
+          await user.save();
+          payment.remnawaveUserId = remnawaveUserId;
+          await payment.save();
+        } else {
+          await ctx.reply(ctx.i18n('purchaseErrorRemnawave', { message: remnaApiResponse.message || 'Panel sync failed after balance payment.' }));
+        }
+      } catch (error) {
+        await ctx.reply(ctx.i18n('purchaseErrorRemnawave', { message: error.message || 'Exception during panel sync after balance payment.' }));
+      }
+    }
+
+    // Удаляем предыдущие сообщения
+    if (ctx.session.lastBotMessages) {
+      for (const msgId of ctx.session.lastBotMessages) {
+        await ctx.deleteMessage(msgId).catch(e => console.log('Failed to delete message:', e.message));
+      }
+    }
+
+    // Сообщаем об успехе
+    const successMessage = ctx.i18n('paymentSuccessfulBalance', {
+      tariffName: payment.tariffId,
+      endDate: endDate.toLocaleDateString(ctx.session?.language || 'ru-RU'),
+      traffic: payment.trafficAllocatedGb,
+      devices: paymentDetails.selectedConnectionsOpt.id
+    });
+    const sentMsg = await ctx.replyWithHTML(successMessage);
+    ctx.session.lastBotMessages = [sentMsg.message_id];
+
+    await ctx.scene.leave();
+    await showMainMenu(ctx);
+    return;
+  } else {
+    // Баланса не хватает — переключаем режим использования баланса как скидки
+    if (useBalance) {
+      // Если уже включен — отключаем
+      ctx.scene.state.useBalance = false;
+    } else {
+      // Включаем использование баланса как скидки
+      ctx.scene.state.useBalance = true;
+    }
+    
+    // Обновляем экран выбора способа оплаты с новым состоянием кнопки
+    const { tariffConfig } = ctx.scene.state;
+    const selectedDurationOpt = DURATION_OPTIONS.find(opt => opt.id === tariffConfig.duration);
+    const selectedGbOpt = GB_OPTIONS.find(opt => opt.id === tariffConfig.gb);
+    const selectedConnectionsOpt = CONNECTIONS_OPTIONS.find(opt => opt.id === tariffConfig.connections);
+    
+    const finalPriceRUB = calculatePrice(tariffConfig, config.tariffCoefficients, ctx);
+    const tariffName = ctx.i18n('customTariffName', {
+      duration: ctx.i18n(selectedDurationOpt.labelKey, { value: selectedDurationOpt.id }),
+      gb: ctx.i18n(selectedGbOpt.labelKey, { value: selectedGbOpt.id }),
+      connections: ctx.i18n(selectedConnectionsOpt.labelKey, { value: selectedConnectionsOpt.id })
+    });
+
+    let finalPriceUSD = null;
+    const usdtToRubRate = await currencyService.getPairPrice('tether', 'rub');
+    if (usdtToRubRate && usdtToRubRate > 0) {
+      finalPriceUSD = finalPriceRUB / usdtToRubRate;
+    }
+
+    const messageText = finalPriceUSD
+      ? ctx.i18n('choosePaymentMethodPromptUSD', { tariffName, priceRUB: finalPriceRUB.toFixed(2), priceUSD: finalPriceUSD.toFixed(2) })
+      : ctx.i18n('choosePaymentMethodPrompt', { tariffName, priceRUB: finalPriceRUB.toFixed(2) });
+
+    // Обновленная кнопка баланса
+    let newUseBalance = ctx.scene.state.useBalance || false;
+    let payWithBalanceTextNew = ctx.i18n('payWithBalanceButton');
+    let messageTextUpdated = messageText;
+    
+    if (newUseBalance) {
+      payWithBalanceTextNew = '✅ ' + payWithBalanceTextNew;
+      const remaining = ((finalPriceUSD || finalPriceRUB) - user.balance).toFixed(2);
+      payWithBalanceTextNew += ` (-$${user.balance.toFixed(2)})`;
+      messageTextUpdated += `\n\n💰 Будет использован баланс: $${user.balance.toFixed(2)}\nК доплате: $${remaining}`;
+    }
+
+    const paymentKeyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(payWithBalanceTextNew, 'PAY_BALANCE')],
+      [Markup.button.callback(ctx.i18n('payWithCryptoBot'), 'PAY_CRYPTOBOT')],
+      [Markup.button.callback(ctx.i18n('payWithTelegramStars'), 'PAY_STARS')],
+      [Markup.button.callback(ctx.i18n('backToTariffConstructor'), 'BACK_TO_CONSTRUCTOR')]
+    ]);
+
+    await ctx.editMessageText(messageTextUpdated, paymentKeyboard);
+    return;
+  }
 });
 
 // Возврат к конструктору тарифов из выбора способа оплаты
@@ -241,6 +416,7 @@ buyScene.action('PAY_CRYPTOBOT', async (ctx) => {
 
   const {
     finalPriceRUB,
+    finalPriceUSD,
     tariffName,
     selectedDurationOpt,
     selectedGbOpt,
@@ -248,11 +424,24 @@ buyScene.action('PAY_CRYPTOBOT', async (ctx) => {
   } = paymentDetails;
   const user = ctx.dbUser;
 
+  // Проверяем, используется ли баланс как скидка
+  const useBalance = ctx.scene.state.useBalance || false;
+  let actualPriceToCharge = finalPriceUSD || finalPriceRUB;
+  
+  if (useBalance && user.balance > 0) {
+    // Уменьшаем сумму к оплате на размер баланса
+    actualPriceToCharge = Math.max(0, actualPriceToCharge - user.balance);
+    if (actualPriceToCharge <= 0) {
+      await ctx.reply(ctx.i18n('balanceCoversFullAmount'));
+      return;
+    }
+  }
+
   // For CryptoBot, we need to decide which asset to request payment in.
   // The API supports: BTC, TON, ETH (Native), USDT (TRC20, BEP20), USDC (TRC20, BEP20), BUSD (BEP20).
   // Let's assume we want to receive payment in USDT (TRC20).
-  // The price `finalPriceRUB` needs to be converted to USDT.
-  const usdtPrice = await currencyService.convertUSDToCrypto(paymentDetails.finalPriceUSD, 'tether');
+  // The price needs to be converted to USDT.
+  const usdtPrice = await currencyService.convertUSDToCrypto(actualPriceToCharge, 'tether');
 
   if (!usdtPrice || usdtPrice <= 0) {
     await ctx.reply(ctx.i18n('paymentErrorPriceConversion'));
@@ -299,13 +488,16 @@ buyScene.action('PAY_CRYPTOBOT', async (ctx) => {
         tariffId: `custom_${tariffConfig.duration}m_${tariffConfig.gb}gb_${tariffConfig.connections}dev`,
         paymentSystem: 'cryptobot',
         paymentId: invoice.invoice_id, // CryptoBot's invoice ID
-        amount: parseFloat(cryptoBotPayload.amount), // Amount in crypto (USDT)
+        amount: actualPriceToCharge, // Amount charged after balance discount
+        originalAmount: finalPriceUSD || finalPriceRUB, // Original full amount
+        balanceUsed: useBalance ? user.balance : 0, // How much balance will be used
         currency: cryptoBotPayload.asset, // USDT
         status: 'pending', // Payment is pending until webhook confirmation
         startDate: startDate, // Will be set upon completion
         endDate: endDate,     // Will be set upon completion
         trafficAllocatedGb: parseInt(selectedGbOpt.id),
         isTrial: false,
+        useBalance: useBalance, // Flag indicating balance should be deducted on success
       });
       await newPayment.save();
       
@@ -348,18 +540,26 @@ buyScene.action('PAY_STARS', async (ctx) => {
   } = paymentDetails;
   const user = ctx.dbUser;
 
-  if (!config.telegramStarsToken) {
-      await ctx.reply(ctx.i18n('telegramStarsNotConfiguredError'));
-      return ctx.scene.reenter();
+  // Проверяем, используется ли баланс как скидка
+  const useBalance = ctx.scene.state.useBalance || false;
+  let actualPriceToCharge = finalPriceUSD;
+  
+  if (useBalance && user.balance > 0) {
+    // Уменьшаем сумму к оплате на размер баланса
+    actualPriceToCharge = Math.max(0, actualPriceToCharge - user.balance);
+    if (actualPriceToCharge <= 0) {
+      await ctx.reply(ctx.i18n('balanceCoversFullAmount'));
+      return;
+    }
   }
 
-  if (!finalPriceUSD || finalPriceUSD <= 0) {
+  if (!actualPriceToCharge) {
     await ctx.reply(ctx.i18n('paymentErrorPriceConversion'));
     return ctx.scene.reenter();
   }
 
   // Convert USD to Stars: 1 Star = $0.013
-  const priceInStars = Math.round(finalPriceUSD / currencyService.TELEGRAM_STAR_TO_USD_RATE);
+  const priceInStars = Math.round(actualPriceToCharge / currencyService.TELEGRAM_STAR_TO_USD_RATE);
 
   if (priceInStars < 1) { // Telegram Stars minimum is 1 star
       await ctx.reply(ctx.i18n('paymentErrorStarsMinAmount'));
@@ -387,13 +587,16 @@ buyScene.action('PAY_STARS', async (ctx) => {
     tariffId: `custom_${tariffConfig.duration}m_${tariffConfig.gb}gb_${tariffConfig.connections}dev`,
     paymentSystem: 'telegram_stars',
     // paymentId will be telegram_charge_id after successful payment
-    amount: priceInStars, // Amount in Stars
+    amount: priceInStars, // Amount in Stars (reduced if balance used)
+    originalAmount: finalPriceUSD, // Original full amount in USD
+    balanceUsed: useBalance ? user.balance : 0, // How much balance will be used
     currency: 'XTR', // Telegram Stars currency code
     status: 'pending_stars_invoice',
     startDate: startDate,
     endDate: endDate,
     trafficAllocatedGb: parseInt(selectedGbOpt.id),
     isTrial: false,
+    useBalance: useBalance, // Flag indicating balance should be deducted on success
   });
   await preliminaryPayment.save();
 
@@ -468,6 +671,17 @@ buyScene.action(/CHECK_CRYPTOBOT_PAYMENT_SCENE_(\S+)/, async (ctx) => {
         paymentRecord.status = 'active'; // Or 'completed'
         paymentRecord.updatedAt = new Date();
         
+        // Списываем баланс если был включен режим скидки
+        console.log(`[CryptoBot Check] Checking balance deduction: useBalance=${paymentRecord.useBalance}, balanceUsed=${paymentRecord.balanceUsed}, userBalance=${user.balance}`);
+        if (paymentRecord.useBalance && paymentRecord.balanceUsed > 0) {
+          const oldBalance = user.balance;
+          user.balance = Math.max(0, user.balance - paymentRecord.balanceUsed);
+          await user.save();
+          console.log(`[CryptoBot Check] Deducted $${paymentRecord.balanceUsed} from user ${user.telegramId} balance: $${oldBalance} -> $${user.balance}`);
+        } else {
+          console.log(`[CryptoBot Check] No balance deduction needed: useBalance=${paymentRecord.useBalance}, balanceUsed=${paymentRecord.balanceUsed}`);
+        }
+        
         // Ensure Remnawave user exists and subscription is created
         let remnawaveUserId = user.remnawaveUserId;
         if (!remnawaveUserId) {
@@ -477,7 +691,13 @@ buyScene.action(/CHECK_CRYPTOBOT_PAYMENT_SCENE_(\S+)/, async (ctx) => {
                 const deviceLimitPart = tariffParts.find(part => part.endsWith('dev'));
                 const hwidDeviceLimit = deviceLimitPart ? parseInt(deviceLimitPart.replace('dev', ''), 10) : 1; // Default to 1
 
-                const usernameForPanel = `user${user.telegramId}`; // Simple username generation
+                // Создаём уникальное имя в формате user{telegramId}_{короткий_суффикс}
+                // Ограничиваем длину до 34 символов для соответствия требованиям Remnawave
+                const shortSuffix = Math.random().toString(36).substring(2, 6); // 4 символа
+                const baseUsername = `user${user.telegramId}`;
+                const usernameForPanel = baseUsername.length + shortSuffix.length + 1 <= 34 
+                  ? `${baseUsername}_${shortSuffix}`
+                  : `u${user.telegramId}_${shortSuffix}`; // Укороченная версия если слишком длинно
 
                 const userDataForRemnawave = {
                   username: usernameForPanel,
@@ -525,9 +745,12 @@ buyScene.action(/CHECK_CRYPTOBOT_PAYMENT_SCENE_(\S+)/, async (ctx) => {
           amount: parseFloat(invoiceDetails.amount),
           asset: invoiceDetails.asset
         });
-        await ctx.editMessageText(successMessage, Markup.inlineKeyboard([
+        await ctx.editMessageText(successMessage, {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback(ctx.i18n('backToMainMenuButton'), 'LEAVE_SCENE_BUY_SUCCESS')]
-        ]));
+          ]).reply_markup
+        });
         // await ctx.scene.leave(); // Leave after success message and button
         // await showMainMenu(ctx);
       } else if (invoiceDetails.status === 'expired') {
@@ -577,7 +800,10 @@ buyScene.action('LEAVE_SCENE_BUY', async (ctx) => {
 // Handle SuccessfulPayment inside scene
 buyScene.on('successful_payment', async (ctx) => {
   const successfulPayment = ctx.message.successful_payment;
-  console.log('[BuyScene] Received SuccessfulPayment:', successfulPayment);
+  console.log('[BuyScene] =================== SUCCESSFUL PAYMENT RECEIVED ===================');
+  console.log('[BuyScene] SuccessfulPayment object:', JSON.stringify(successfulPayment, null, 2));
+  console.log('[BuyScene] User ID:', ctx.from.id);
+  console.log('[BuyScene] =================================================================');
 
   const internalPaymentId = successfulPayment.invoice_payload;
   const telegramChargeId = successfulPayment.telegram_payment_charge_id;
@@ -588,12 +814,24 @@ buyScene.on('successful_payment', async (ctx) => {
   }
 
   try {
+    console.log(`[BuyScene] Looking for payment with ID: ${internalPaymentId}`);
     const payment = await Payment.findById(internalPaymentId);
     if (!payment) {
       console.error(`[BuyScene] Payment not found for SuccessfulPayment. Internal ID: ${internalPaymentId}`);
       await ctx.reply(ctx.i18n('paymentErrorSuccessfulPaymentNotFound'));
       return;
     }
+
+    console.log(`[BuyScene] Found payment:`, {
+      id: payment._id,
+      userId: payment.userId,
+      paymentSystem: payment.paymentSystem,
+      status: payment.status,
+      amount: payment.amount,
+      originalAmount: payment.originalAmount,
+      balanceUsed: payment.balanceUsed,
+      useBalance: payment.useBalance
+    });
 
     if (payment.status === 'active' || payment.status === 'completed') {
       console.warn(`[BuyScene] Payment ${internalPaymentId} already marked as ${payment.status}. Ignoring duplicate SuccessfulPayment.`);
@@ -615,6 +853,16 @@ buyScene.on('successful_payment', async (ctx) => {
 
     const user = await User.findOne({ telegramId: payment.userId });
     if (user) {
+      // Списываем баланс, если он использовался как скидка
+      console.log(`[BuyScene] Checking balance deduction: useBalance=${payment.useBalance}, balanceUsed=${payment.balanceUsed}, userBalance=${user.balance}`);
+      if (payment.useBalance && payment.balanceUsed > 0) {
+        const oldBalance = user.balance;
+        user.balance = Math.max(0, user.balance - payment.balanceUsed);
+        await user.save();
+        console.log(`[BuyScene] Deducted $${payment.balanceUsed} from user ${user.telegramId} balance: $${oldBalance} -> $${user.balance}`);
+      } else {
+        console.log(`[BuyScene] No balance deduction needed: useBalance=${payment.useBalance}, balanceUsed=${payment.balanceUsed}`);
+      }
       let remnawaveUserId = user.remnawaveUserId;
       if (!remnawaveUserId) {
         try {
@@ -622,8 +870,12 @@ buyScene.on('successful_payment', async (ctx) => {
           const deviceLimitPart = tariffParts.find(part => part.endsWith('dev'));
           const hwidDeviceLimit = deviceLimitPart ? parseInt(deviceLimitPart.replace('dev', ''), 10) : 1;
 
-          const randomSuffix = Math.random().toString(36).substring(2, 8);
-          const usernameForPanel = `user${user.telegramId}_${randomSuffix}`;
+          // Создаём уникальное имя в формате user{telegramId}_{короткий_суффикс}
+          const shortSuffix = Math.random().toString(36).substring(2, 6); // 4 символа
+          const baseUsername = `user${user.telegramId}`;
+          const usernameForPanel = baseUsername.length + shortSuffix.length + 1 <= 34 
+            ? `${baseUsername}_${shortSuffix}`
+            : `u${user.telegramId}_${shortSuffix}`; // Укороченная версия если слишком длинно
 
           const userDataForRemnawave = {
             username: usernameForPanel,
@@ -653,6 +905,13 @@ buyScene.on('successful_payment', async (ctx) => {
         } catch (error) {
           console.error(`[BuyScene] Exception during Remnawave user creation for ${user.telegramId}:`, error);
           await ctx.reply(ctx.i18n('purchaseErrorRemnawave', { message: error.message || 'Exception during panel sync after Stars payment.' }));
+        }
+      } else {
+        // User already has a Remnawave ID, potentially update their subscription in Remnawave
+        // Ensure payment record is linked if it wasn't
+        if (!payment.remnawaveUserId) {
+            payment.remnawaveUserId = remnawaveUserId;
+            await payment.save();
         }
       }
     }

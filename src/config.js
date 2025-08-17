@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 module.exports = {
+  botAdmins: (process.env.BOT_ADMINS || '').split(',').map(id => id.trim()).filter(Boolean),
   botToken: process.env.BOT_TOKEN,
   webhookUrl: process.env.WEBHOOK_URL, // Опционально
 
@@ -40,7 +41,7 @@ module.exports = {
   trialDeviceLimit: parseInt(process.env.TRIAL_DEVICE_LIMIT, 10) || 1,
 
   referralEnabled: process.env.REFERRAL_ENABLED === 'true',
-  referralBonusDays: parseInt(process.env.REFERRAL_BONUS, 10) || 5, // N дней за реферала
+  referralBonusAmount: parseFloat(process.env.REFERRAL_BONUS_USD) || 0.5, // $ за реферала
 
   // Новый параметр для сквада
   internalSquadUuid: process.env.INTERNAL_SQUAD_UUID,
